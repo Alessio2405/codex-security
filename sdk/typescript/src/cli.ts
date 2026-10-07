@@ -685,7 +685,6 @@ class PublicationProgressPresenter {
       try {
         dashboard.stop();
       } catch {}
-      this.#dashboard = null;
     }
   }
 
@@ -1675,14 +1674,10 @@ export async function runCodexSkillCommand(
               }),
             ]);
       invocationStatus = new Promise<number>((resolve, reject) => {
-        let completed = false;
         const complete = (
           code: number | null,
           signal: NodeJS.Signals | null,
         ): void => {
-          if (completed) return;
-          completed = true;
-          forceStatusCompletion = null;
           resolve(
             requestedSignal === "SIGINT" || signal === "SIGINT"
               ? 130
@@ -1692,12 +1687,7 @@ export async function runCodexSkillCommand(
           );
         };
         forceStatusCompletion = () => complete(null, null);
-        invocation.once("error", (error) => {
-          if (completed) return;
-          completed = true;
-          forceStatusCompletion = null;
-          reject(error);
-        });
+        invocation.once("error", reject);
         invocation.once(output === undefined ? "exit" : "close", complete);
       });
       let [status, events] = await Promise.all([invocationStatus, captured]);
