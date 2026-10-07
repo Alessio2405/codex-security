@@ -193,14 +193,15 @@ export interface ScanArtifactRestorer {
 function environmentValue(
   environment: ProcessEnvironment,
   requested: string,
+  preserveWhitespace = false,
 ): string | undefined {
-  const exact = environment[requested]?.trim();
-  if (exact) return exact;
-  return Object.entries(environment)
-    .find(
-      ([name, value]) => name.toUpperCase() === requested && value?.trim(),
-    )?.[1]
-    ?.trim();
+  const exact = environment[requested];
+  const value = exact?.trim()
+    ? exact
+    : Object.entries(environment).find(
+        ([name, value]) => name.toUpperCase() === requested && value?.trim(),
+      )?.[1];
+  return preserveWhitespace ? value : value?.trim();
 }
 
 export function codexSecurityStateDirectory(
@@ -212,7 +213,7 @@ export function codexSecurityStateDirectory(
       ? resolve(expandHome(configured, environment))
       : resolve(
           expandHome(
-            environmentValue(environment, "CODEX_HOME") ??
+            environmentValue(environment, "CODEX_HOME", true) ??
               join(homedir(), ".codex"),
             environment,
           ),
@@ -2897,7 +2898,8 @@ export async function resolvePluginPython(
 
   const home = options.homeDirectory ?? homedir();
   const cacheDirectory =
-    environmentValue(environment, "XDG_CACHE_HOME") || join(home, ".cache");
+    environmentValue(environment, "XDG_CACHE_HOME", true) ||
+    join(home, ".cache");
   const managedRoots = options.managedRuntimeRoots ?? [
     join(cacheDirectory, "codex-runtimes", "codex-primary-runtime"),
   ];

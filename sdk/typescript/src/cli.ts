@@ -59,7 +59,7 @@ import {
   type ArtifactExportArguments,
 } from "./artifact-export.js";
 export { exportEnvironment } from "./artifact-export.js";
-import { parse as parseToml } from "smol-toml";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import {
   classifyConnectionFailure,
   CodexSecurity,
@@ -1356,7 +1356,9 @@ export async function runCodexSkillCommand(
         output.appServer === undefined
           ? {}
           : resolveCodexProfile(await readCodexHomeConfig(processEnvironment));
-      const overrides = structuredClone(output.codexOverrides ?? {});
+      const overrides = parseToml(
+        stringifyToml(output.codexOverrides ?? {}),
+      ) as JsonObject;
       const config = deepMerge(ambientConfig, overrides);
       const provider = output.modelProvider ?? scanModelProvider(config);
       // Native Codex ignores configured tables for these built-in providers.
@@ -1372,7 +1374,7 @@ export async function runCodexSkillCommand(
         typeof providerConfiguration?.["env_key"] === "string"
           ? providerConfiguration["env_key"]
           : undefined;
-      const commandAuth = providerConfiguration?.["auth"] !== undefined;
+      const commandAuth = providerConfiguration?.["auth"] != null;
       const explicitChatgpt =
         output.auth === "chatgpt" && !isExternalModelProvider(provider);
       const providerBearer =
