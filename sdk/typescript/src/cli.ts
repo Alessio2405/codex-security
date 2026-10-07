@@ -195,6 +195,7 @@ import {
   resolveCodexCommand,
   resolvePluginPython,
   runWorkbench,
+  sameFile,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
 } from "./runtime.js";
@@ -2060,17 +2061,43 @@ export async function main(
     }),
     output: z.record(z.string(), z.unknown()).optional(),
     async run({ args, format }) {
-      const repository = resolveCliPath(
+      const requestedRepository = resolveCliPath(
         dependencies.currentDirectory(),
         args.repository ?? ".",
+      );
+      const repository = await realpath(requestedRepository).catch(
+        () => requestedRepository,
       );
       return presentHistory(
         await history(
           ["list-repositories"],
           async (value): Promise<JsonObject> => {
-            const target = (value["repositories"] as JsonObject[]).find(
+            const repositories = value["repositories"] as JsonObject[];
+            let target = repositories.find(
+              (entry) => entry["targetPath"] === requestedRepository,
+            );
+            const canonicalTarget = repositories.find(
               (entry) => entry["targetPath"] === repository,
             );
+            if (
+              target === undefined &&
+              canonicalTarget !== undefined &&
+              (await sameFile(
+                canonicalTarget["targetPath"] as string,
+                requestedRepository,
+              ))
+            ) {
+              target = canonicalTarget;
+            }
+            if (target === undefined) {
+              for (const entry of repositories) {
+                const storedPath = entry["targetPath"] as string;
+                if (await sameFile(storedPath, requestedRepository)) {
+                  target = entry;
+                  break;
+                }
+              }
+            }
             const findings =
               target === undefined
                 ? []
@@ -3138,7 +3165,7 @@ export async function main(
       try {
         const result = await (
           dependencies.checkScanPublication ?? checkScanPublication
-        )(resolve(dependencies.currentDirectory(), args.scanDir), {
+        )(resolveCliPath(dependencies.currentDirectory(), args.scanDir), {
           ...publicationDestination(options, dependencies.environment),
           signal: controller.signal,
         });
