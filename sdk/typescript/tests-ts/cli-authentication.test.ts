@@ -623,38 +623,44 @@ describe("CLI authentication", () => {
     }
   });
 
-  test("interactive scan selection names the configured provider key", async () => {
-    const stderr = captureCli(main, "stderr", true);
-    const deps = dependencies({
-      environment: {
-        SYNTHETIC_PROVIDER_KEY: "synthetic-provider-key",
-        OPENAI_API_KEY: "synthetic-unrelated-key",
-      },
-    });
-    deps.hasStoredChatGPTSignIn = async () => true;
-    let prompted = false;
-    deps.scanAuthenticationPrompt = selectionPrompt(
-      async (_message, options) => {
-        prompted = true;
-        const selected = options.find((option) => option.value === "api-key")!;
-        expect(selected.label).toBe("API key from SYNTHETIC_PROVIDER_KEY");
-        return selected.value;
-      },
-    );
-    expect(
-      await stderr.run(
-        [
-          "scan",
-          "--codex",
-          'model_provider="gateway"',
-          "--codex",
-          'model_providers.gateway.env_key="SYNTHETIC_PROVIDER_KEY"',
-        ],
-        deps,
-      ),
-    ).toBe(0);
-    expect(prompted).toBe(true);
-  });
+  test.each([false, true])(
+    "keeps env_key-backed scans out of the ChatGPT chooser (unrelated key: %s)",
+    async (unrelatedKey) => {
+      const stderr = captureCli(main, "stderr", true);
+      const onTurn = mock((_repository: string, { auth }: ScanOptions) => auth);
+      const deps = dependencies({
+        environment: {
+          SYNTHETIC_PROVIDER_KEY: "synthetic-provider-key",
+          ...(unrelatedKey
+            ? { OPENAI_API_KEY: "synthetic-unrelated-key" }
+            : {}),
+        },
+        onTurn,
+      });
+      deps.hasStoredChatGPTSignIn = async () => true;
+      let prompted = false;
+      deps.scanAuthenticationPrompt = selectionPrompt(
+        async (_message, options) => {
+          prompted = true;
+          return options.find((option) => option.value === "chatgpt")!.value;
+        },
+      );
+      expect(
+        await stderr.run(
+          [
+            "scan",
+            "--codex",
+            'model_provider="gateway"',
+            "--codex",
+            'model_providers.gateway.env_key="SYNTHETIC_PROVIDER_KEY"',
+          ],
+          deps,
+        ),
+      ).toBe(0);
+      expect(prompted).toBe(false);
+      expect(onTurn.mock.results.at(-1)?.value).toBe("auto");
+    },
+  );
 
   test("cancels sign-in discovery and authentication prompts before starting a scan", async () => {
     for (const stage of ["status", "prompt"] as const) {

@@ -2993,7 +2993,7 @@ export class CodexSecurity {
         await releaseCredentialHome?.();
         releaseCredentialHome = null;
       }
-      if (providerEnvKey === undefined && apiKey !== null) {
+      if (authentication.method === "api_key") {
         this.#runtimeCredentialSource = "api_key";
       }
       if (

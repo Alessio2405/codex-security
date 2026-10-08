@@ -8081,6 +8081,7 @@ async function chooseInteractiveAuthentication(
   if (
     errorOutput.isTTY !== true ||
     isExternalModelProvider(provider) ||
+    options.providerEnvKey !== undefined ||
     (auth !== undefined && auth !== "auto")
   )
     return auth;
