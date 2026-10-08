@@ -1407,6 +1407,12 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           const provider = index === 0 ? undefined : "synthetic.gateway";
           const providerEnvKey =
             index === 2 ? "SYNTHETIC_ALTERNATE_KEY" : "SYNTHETIC_GATEWAY_KEY";
+          const providerHeaderKey =
+            index === 2
+              ? "CODEX_API_KEY"
+              : index === 3
+                ? "OPENAI_API_KEY"
+                : "SYNTHETIC_HEADER_VALUE";
           const providerConfig =
             index === 0
               ? undefined
@@ -1415,7 +1421,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                   base_url: `https://gateway-${index}.example.test/v1`,
                   wire_api: "responses",
                   env_key: providerEnvKey,
-                  env_http_headers: { "X-Synthetic": "SYNTHETIC_HEADER_VALUE" },
+                  env_http_headers: { "X-Synthetic": providerHeaderKey },
                   ...(index === 3 ? {} : { requires_openai_auth: index === 2 }),
                   experimental_bearer_token: `synthetic-bearer-${index}`,
                   auth: {
@@ -1450,12 +1456,13 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             provider,
             providerConfig,
             providerEnvKey,
+            providerHeaderKey,
             environment:
               index === 0
                 ? undefined
                 : {
                     [providerEnvKey]: providerKeys[index],
-                    SYNTHETIC_HEADER_VALUE: providerHeaders[index],
+                    [providerHeaderKey]: providerHeaders[index],
                     CODEX_SQLITE_HOME: path.join(
                       fixture.root,
                       `native-state-${index}`,
@@ -1714,8 +1721,20 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               invocation.alternateProviderKey,
               index === 2 ? providerKeys[index] : undefined,
             );
-            assert.equal(invocation.providerHeader, providerHeaders[index]);
-            assert.equal(workerLaunch.environment!.CODEX_API_KEY, undefined);
+            assert.equal(
+              invocation.providerHeader,
+              workerConfigurations[index].environment?.SYNTHETIC_HEADER_VALUE,
+            );
+            for (const name of ["CODEX_API_KEY", "OPENAI_API_KEY"]) {
+              assert.equal(
+                workerLaunch.environment![name],
+                workerConfigurations[index].environment?.[name],
+              );
+              assert.equal(
+                invocation.providerHeaderCredentials[name],
+                workerConfigurations[index].environment?.[name],
+              );
+            }
             assert.equal(
               workerLaunch.environment!.CODEX_SQLITE_HOME,
               workerConfigurations[index].environment?.CODEX_SQLITE_HOME,
@@ -1874,6 +1893,12 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               preflight.providerHeader,
               selectedProvider.environment?.SYNTHETIC_HEADER_VALUE,
             );
+            for (const name of ["CODEX_API_KEY", "OPENAI_API_KEY"]) {
+              assert.equal(
+                preflight.providerHeaderCredentials[name],
+                selectedProvider.environment?.[name],
+              );
+            }
             assertConfigOverrides(preflight.argv, {
               openai_base_url: selectedProvider.endpoint,
               model_instructions_file: selectedProvider.instructionsFile,
@@ -2844,7 +2869,7 @@ const preflightAllowed = ${JSON.stringify(preflightAllowed)};
 const accountResult = ${JSON.stringify(accountResult)};
 const preflightMarkerPath = process.env.FAKE_CODEX_PREFLIGHT_MARKER ?? ${JSON.stringify(preflightMarkerPath)};
 if (process.argv.includes('app-server')) {
-  const preflight = { argv: process.argv.slice(2), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, runnerTrackingId: process.env.RUNNER_TRACKING_ID, libraryPath: process.env.LD_LIBRARY_PATH, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, alternateProviderKey: process.env.SYNTHETIC_ALTERNATE_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
+  const preflight = { argv: process.argv.slice(2), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, runnerTrackingId: process.env.RUNNER_TRACKING_ID, libraryPath: process.env.LD_LIBRARY_PATH, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, alternateProviderKey: process.env.SYNTHETIC_ALTERNATE_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, providerHeaderCredentials: { CODEX_API_KEY: process.env.CODEX_API_KEY, OPENAI_API_KEY: process.env.OPENAI_API_KEY }, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
   writeFileSync(preflightMarkerPath, JSON.stringify(preflight));
   let buffer = '';
   process.stdin.setEncoding('utf8');
@@ -2893,7 +2918,7 @@ if (pythonProbe && pythonProbe.status !== 0) throw new Error(pythonProbe.stderr 
 const pythonRuntime = pythonProbe ? JSON.parse(pythonProbe.stdout) : undefined;
 const knowledgePath = stdin.includes('synthetic worker configuration fixture') ? process.env.CODEX_SECURITY_KNOWLEDGE_BASE : undefined;
 const knowledgeDocuments = knowledgePath === undefined ? undefined : Object.fromEntries(readdirSync(knowledgePath).map(name => [name, readFileSync(join(knowledgePath, name), 'utf8')]));
-writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), knowledgePath, knowledgeDocuments, codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, alternateProviderKey: process.env.SYNTHETIC_ALTERNATE_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
+writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), knowledgePath, knowledgeDocuments, codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, alternateProviderKey: process.env.SYNTHETIC_ALTERNATE_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, providerHeaderCredentials: { CODEX_API_KEY: process.env.CODEX_API_KEY, OPENAI_API_KEY: process.env.OPENAI_API_KEY }, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
 if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => { if (!stdin.includes('IGNORE_TERMINATION')) setTimeout(() => process.exit(0), 100); });
 if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }
 if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }

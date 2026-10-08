@@ -112,6 +112,25 @@ export function scanModelProvider(config: Readonly<JsonObject>): unknown {
 export function scanProviderEnvironmentKey(
   config: JsonObject,
 ): string | undefined {
+  const provider = scanProviderConfiguration(config);
+  return typeof provider?.["env_key"] === "string"
+    ? provider["env_key"]
+    : undefined;
+}
+
+/** @internal Environment values explicitly referenced by the selected provider. */
+export function scanProviderHeaderEnvironmentNames(
+  config: JsonObject,
+): string[] {
+  const headers = scanProviderConfiguration(config)?.["env_http_headers"];
+  return isObject(headers)
+    ? Object.values(headers).filter(
+        (name): name is string => typeof name === "string",
+      )
+    : [];
+}
+
+function scanProviderConfiguration(config: JsonObject): JsonObject | undefined {
   const selected = scanModelProvider(config);
   if (
     typeof selected !== "string" ||
@@ -121,9 +140,7 @@ export function scanProviderEnvironmentKey(
   }
   const providers = resolveCodexProfile(config)["model_providers"];
   const provider = isObject(providers) ? providers[selected] : undefined;
-  return isObject(provider) && typeof provider["env_key"] === "string"
-    ? provider["env_key"]
-    : undefined;
+  return isObject(provider) ? provider : undefined;
 }
 
 /** @internal Native Codex validates the auth table, including invalid selections. */

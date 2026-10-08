@@ -71,6 +71,7 @@ import {
   scanModelConfiguration,
   scanModelProvider,
   scanProviderEnvironmentKey,
+  scanProviderHeaderEnvironmentNames,
   structuredCodexConfig,
   type CodexSecurityConfig,
   type JsonObject,
@@ -1369,6 +1370,10 @@ export class CodexSecurity {
             options.auth,
             modelProvider,
           ),
+        ),
+        ...selectedProviderHeaderEnvironment(
+          effectiveConfig,
+          runtime.environment,
         ),
         ...(session.apiKey === null
           ? {}
@@ -2772,6 +2777,10 @@ export class CodexSecurity {
         : this.#codexCommand().command;
     let sdkEnvironment = definedEnvironment({
       ...withoutOpenAiApiKeys(environment),
+      ...selectedProviderHeaderEnvironment(
+        session.effectiveConfig,
+        environment,
+      ),
       ...(providerEnvKey === undefined || apiKey === null
         ? {}
         : { [providerEnvKey]: apiKey }),
@@ -4472,6 +4481,18 @@ function environmentApiKey(
   return (
     environmentApiKeyEntry(environment, modelProvider, providerEnvKey)?.value ??
     null
+  );
+}
+
+function selectedProviderHeaderEnvironment(
+  config: JsonObject,
+  environment: ProcessEnvironment,
+): ProcessEnvironment {
+  return Object.fromEntries(
+    scanProviderHeaderEnvironmentNames(config).flatMap((name) => {
+      const value = environmentEntry(environment, name);
+      return value === undefined ? [] : [[name, value]];
+    }),
   );
 }
 

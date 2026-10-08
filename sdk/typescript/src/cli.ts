@@ -132,6 +132,7 @@ import {
   scanModel,
   scanModelConfiguration,
   scanModelProvider,
+  scanProviderEnvironmentKey,
   writeCodexConfig,
   type CodexSecurityConfig,
   type ExternalModelProvider,
@@ -8068,6 +8069,8 @@ async function chooseInteractiveAuthentication(
   options: {
     auth: ScanAuthMode | undefined;
     provider: unknown;
+    providerEnvKey?: string;
+    commandAuth?: boolean;
     command: "scan" | "policy";
     signal: AbortSignal;
   },
@@ -8085,6 +8088,8 @@ async function chooseInteractiveAuthentication(
     dependencies.environment,
     auth,
     provider,
+    options.commandAuth,
+    options.providerEnvKey,
   );
   if (authentication.method !== "api_key") return auth;
   const prompt =
@@ -8301,6 +8306,10 @@ async function executeScan(
             {
               auth: arguments_.auth,
               provider,
+              providerEnvKey: scanProviderEnvironmentKey(
+                effectiveConfiguration,
+              ),
+              commandAuth: hasCommandAuth(effectiveConfiguration),
               command: "scan",
               signal: preparationAbortController.signal,
             },
@@ -8328,6 +8337,7 @@ async function executeScan(
           auth,
           provider,
           hasCommandAuth(effectiveConfiguration),
+          scanProviderEnvironmentKey(effectiveConfiguration),
         );
     diagnostic("scan.configuration", {
       cli_version: VERSION,
