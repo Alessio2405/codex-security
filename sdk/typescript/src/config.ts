@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, rename, unlink } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { stringify } from "smol-toml";
+import { dirname, join, resolve } from "node:path";
+import type { CyberAccessProgram } from "@openai/codex-sdk";
+import { parse, stringify } from "smol-toml";
 import { ConfigurationError } from "./errors.js";
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -14,7 +15,6 @@ export interface CodexSecurityConfig {
   pluginPath?: string;
   codexOverrides?: JsonObject;
   pythonPath?: string;
-  azureOpenAI?: AzureOpenAIOptions;
 }
 
 export interface ScanModelConfiguration {
@@ -22,69 +22,71 @@ export interface ScanModelConfiguration {
   reasoningEffort: string;
 }
 
-export interface AzureOpenAIOptions {
-  endpoint: string;
+export const OPENROUTER_CODEX_PROVIDER = {
+  name: "OpenRouter",
+  base_url: "https://openrouter.ai/api/v1",
+  env_key: "OPENROUTER_API_KEY",
+  wire_api: "responses",
+} as const satisfies JsonObject;
+
+export const FIREWORKS_CODEX_PROVIDER = {
+  name: "Fireworks AI",
+  base_url: "https://api.fireworks.ai/inference/v1",
+  env_key: "FIREWORKS_API_KEY",
+  wire_api: "responses",
+} as const satisfies JsonObject;
+
+export const EXTERNAL_CODEX_PROVIDERS = {
+  openrouter: OPENROUTER_CODEX_PROVIDER,
+  fireworks: FIREWORKS_CODEX_PROVIDER,
+} as const;
+
+export type ExternalModelProvider = keyof typeof EXTERNAL_CODEX_PROVIDERS;
+
+export function isExternalModelProvider(
+  provider: unknown,
+): provider is ExternalModelProvider {
+  return (
+    typeof provider === "string" &&
+    Object.hasOwn(EXTERNAL_CODEX_PROVIDERS, provider)
+  );
 }
 
-export const AZURE_OPENAI_PROVIDER_ID = "codex_security_azure_openai";
-
-export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = {
+export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = Object.freeze({
+  approval_policy: "on-request",
+  approvals_reviewer: "auto_review",
   cli_auth_credentials_store: "auto",
   model: "gpt-5.6-sol",
   model_reasoning_effort: "xhigh",
-  features: {
+  model_reasoning_summary: "detailed",
+  show_raw_agent_reasoning: true,
+  features: Object.freeze({
     plugins: true,
     goals: true,
-    multi_agent_v2: {
+    multi_agent_v2: Object.freeze({
       enabled: true,
       max_concurrent_threads_per_session: 9,
-    },
-  },
-  // Named filesystem profiles need an active Windows sandbox backend.
-  windows: {
-    sandbox: "unelevated",
-  },
-};
-
-deepFreezeJson(DEFAULT_CODEX_CONFIG);
-
-export function azureOpenAICodexOverrides(
-  options: AzureOpenAIOptions,
-): JsonObject {
-  if (
-    typeof options !== "object" ||
-    options === null ||
-    typeof options.endpoint !== "string"
-  ) {
-    throw new ConfigurationError(
-      "azureOpenAI.endpoint must be a valid HTTPS URL.",
-    );
-  }
-  const endpoint = normalizeAzureOpenAIEndpoint(options.endpoint);
-  const provider: JsonObject = {
-    name: "Azure OpenAI",
-    base_url: endpoint,
-    env_key: "AZURE_OPENAI_API_KEY",
-    wire_api: "responses",
-  };
-  return {
-    model_provider: AZURE_OPENAI_PROVIDER_ID,
-    model_providers: {
-      [AZURE_OPENAI_PROVIDER_ID]: provider,
-    },
-  };
-}
+    }),
+  }),
+  // Credential read denials require the elevated Windows sandbox backend.
+  windows: Object.freeze({
+    sandbox: "elevated",
+  }),
+});
 
 export function scanModelConfiguration(
   config: Readonly<JsonObject>,
 ): ScanModelConfiguration {
-  const model = config["model"];
+  const selectedProfile = selectedScanProfile(config);
+  const model = scanModel(config);
   if (typeof model !== "string" || model.trim().length === 0) {
     throw new ConfigurationError(
       "The configured Codex model must be a nonempty string.",
     );
   }
-  const reasoningEffort = config["model_reasoning_effort"];
+  const reasoningEffort =
+    selectedProfile?.["model_reasoning_effort"] ??
+    config["model_reasoning_effort"];
   if (
     typeof reasoningEffort !== "string" ||
     reasoningEffort.trim().length === 0
@@ -96,6 +98,152 @@ export function scanModelConfiguration(
   return { model, reasoningEffort };
 }
 
+export function scanModel(config: Readonly<JsonObject>): unknown {
+  const selectedProfile = selectedScanProfile(config);
+  return selectedProfile?.["model"] ?? config["model"];
+}
+
+export function scanModelProvider(config: Readonly<JsonObject>): unknown {
+  const selectedProfile = selectedScanProfile(config);
+  return selectedProfile?.["model_provider"] ?? config["model_provider"];
+}
+
+/** @internal Built-in providers ignore custom provider tables in native Codex. */
+export function scanProviderEnvironmentKey(
+  config: JsonObject,
+): string | undefined {
+  const selected = scanModelProvider(config);
+  if (
+    typeof selected !== "string" ||
+    ["openai", "ollama", "lmstudio"].includes(selected)
+  ) {
+    return undefined;
+  }
+  const providers = resolveCodexProfile(config)["model_providers"];
+  const provider = isObject(providers) ? providers[selected] : undefined;
+  return isObject(provider) && typeof provider["env_key"] === "string"
+    ? provider["env_key"]
+    : undefined;
+}
+
+/** @internal Native Codex validates the auth table, including invalid selections. */
+export function hasCommandAuth(config: Readonly<JsonObject>): boolean {
+  const selected = scanModelProvider(config);
+  const providers = resolveCodexProfile(config)["model_providers"];
+  const provider =
+    typeof selected === "string" && isObject(providers)
+      ? providers[selected]
+      : undefined;
+  return isObject(provider) && provider["auth"] != null;
+}
+
+/** @internal Keep host-side helpers independent of the source checkout. */
+export function resolveCommandAuthConfig(
+  config: JsonObject,
+  home: string,
+): JsonObject {
+  const resolved = structuredClone(config);
+  const providers = resolveCodexProfile(resolved)["model_providers"];
+  if (isObject(providers)) {
+    (selectedScanProfile(resolved) ?? resolved)["model_providers"] = providers;
+    for (const provider of Object.values(providers)) {
+      if (!isObject(provider) || !isObject(provider["auth"])) continue;
+      const auth = provider["auth"];
+      const cwd = auth["cwd"];
+      if (
+        cwd == null ||
+        (typeof cwd === "string" && !/^~(?:[/\\]|$)/u.test(cwd))
+      ) {
+        auth["cwd"] = resolve(home, cwd ?? ".");
+      }
+    }
+  }
+  return resolved;
+}
+
+/** @internal CLI dotted keys cannot represent provider IDs containing dots. */
+export function modelProviderConfigOverride(config: JsonObject): string[] {
+  return config["model_providers"] == null
+    ? []
+    : [`model_providers=${inlineToml(config["model_providers"])}`];
+}
+
+/** @internal Resolve settings; literal-key tables use native file layers. */
+export function structuredCodexConfig(config: JsonObject = {}): JsonObject {
+  const structured = resolveCodexProfile(config);
+  delete structured["projects"];
+  delete structured["permissions"];
+  delete structured["model_providers"];
+  return structured;
+}
+
+/** @internal Serialize one Codex CLI override value without flattening its keys. */
+export function inlineToml(value: JsonValue): string {
+  if (value === null)
+    throw new ConfigurationError(
+      "Codex TOML overrides cannot contain null values.",
+    );
+  if (Array.isArray(value)) return `[${value.map(inlineToml).join(",")}]`;
+  if (isObject(value)) {
+    return `{${Object.entries(value)
+      .filter(([, item]) => item !== null)
+      .map(([key, item]) => `${JSON.stringify(key)}=${inlineToml(item)}`)
+      .join(",")}}`;
+  }
+  return stringify({ value }).slice("value = ".length).trim();
+}
+
+export function scanApprovalPolicy(
+  config: Readonly<JsonObject>,
+): "never" | "on-request" {
+  return config["approval_policy"] === "never" ||
+    selectedScanProfile(config)?.["approval_policy"] === "never"
+    ? "never"
+    : "on-request";
+}
+
+function selectedScanProfile(
+  config: Readonly<JsonObject>,
+): Record<string, JsonValue> | undefined {
+  const profileName = config["profile"];
+  const profiles = config["profiles"];
+  const configuredProfile =
+    typeof profileName === "string" &&
+    isObject(profiles) &&
+    Object.hasOwn(profiles, profileName)
+      ? profiles[profileName]
+      : undefined;
+  return isObject(configuredProfile) ? configuredProfile : undefined;
+}
+
+export function resolveCodexProfile(config: JsonObject): JsonObject {
+  const normalized = parse(stringify(config)) as JsonObject;
+  const resolved = deepMerge(normalized, selectedScanProfile(normalized) ?? {});
+  delete resolved["profile"];
+  delete resolved["profiles"];
+  return resolved;
+}
+
+/** @internal */
+export function scanCyberAccessConfig(
+  config: JsonObject,
+  program: CyberAccessProgram | undefined,
+): JsonObject {
+  if (program === undefined) return config;
+  const resolved = resolveCodexProfile(config);
+  const features = isObject(resolved["features"]) ? resolved["features"] : {};
+  return {
+    ...config,
+    features: {
+      ...(isObject(config["features"]) ? config["features"] : {}),
+      // Explicit selections opt in to upstream API-key support. Keep a user's
+      // explicit disable so Codex can report it instead of silently dropping it.
+      api_key_cyber_access_programs:
+        features["api_key_cyber_access_programs"] ?? true,
+    },
+  };
+}
+
 export async function mergedCodexConfig(
   config: CodexSecurityConfig,
 ): Promise<JsonObject> {
@@ -103,7 +251,7 @@ export async function mergedCodexConfig(
     throw new ConfigurationError("codexOverrides must be an object.");
   }
   validateOverrideKeys(config.codexOverrides ?? {});
-  const overrides = cloneJson(config.codexOverrides ?? {});
+  const overrides = structuredClone(config.codexOverrides ?? {});
   validateOverrides(overrides);
   validateNativeMultiAgentV2Overrides(overrides);
   normalizeLegacyWindowsSandboxOverride(overrides);
@@ -115,29 +263,18 @@ export async function mergedCodexConfig(
       }
     }
   }
-  if (config.azureOpenAI !== undefined) {
-    const modelProvider = overrides["model_provider"];
-    if (modelProvider !== undefined) {
-      throw new ConfigurationError(
-        "azureOpenAI cannot be combined with a codexOverrides model_provider.",
-      );
-    }
-    const modelProviders = overrides["model_providers"];
-    if (
-      modelProviders !== undefined &&
-      (!isObject(modelProviders) ||
-        Object.hasOwn(modelProviders, AZURE_OPENAI_PROVIDER_ID))
-    ) {
-      throw new ConfigurationError(
-        "azureOpenAI owns its Codex model-provider configuration.",
-      );
-    }
-    deepMerge(overrides, azureOpenAICodexOverrides(config.azureOpenAI));
+  const defaults: JsonObject = structuredClone(DEFAULT_CODEX_CONFIG);
+  if (scanModelProvider(overrides) === "amazon-bedrock") {
+    // Bedrock models can reject reasoning.summary before the scan starts.
+    defaults["model_reasoning_summary"] = "none";
   }
-  return deepMerge(cloneJson(DEFAULT_CODEX_CONFIG), overrides);
+  return deepMerge(defaults, overrides);
 }
 
-function normalizeLegacyWindowsSandboxOverride(overrides: JsonObject): void {
+/** @internal Preserve existing native Windows backend selections. */
+export function normalizeLegacyWindowsSandboxOverride(
+  overrides: JsonObject,
+): void {
   const features = overrides["features"];
   if (!isObject(features)) {
     return;
@@ -240,6 +377,11 @@ function validateOverrides(overrides: JsonObject): void {
         `Codex override profile ${name} must be a TOML table.`,
       );
     }
+    if ("plugins" in profile || "marketplaces" in profile) {
+      throw new ConfigurationError(
+        `Codex Security owns plugin loading configuration in profile ${name}.`,
+      );
+    }
     const profileFeatures = profile["features"];
     if (profileFeatures !== undefined && !isObject(profileFeatures)) {
       throw new ConfigurationError(
@@ -263,14 +405,8 @@ function validateNativeMultiAgentV2Overrides(overrides: JsonObject): void {
         "features.multi_agent_v2.max_concurrent_threads_per_session instead.",
     );
   }
-  if ("features" in overrides) {
-    const features = overrides["features"];
-    if (!isObject(features)) {
-      throw new ConfigurationError(
-        "The selected Codex Security plugin requires native multi-agent v2; " +
-          "features must remain a table containing features.multi_agent_v2.",
-      );
-    }
+  const features = overrides["features"];
+  if (isObject(features)) {
     if ("multi_agent_v2" in features) {
       const multiAgentV2 = features["multi_agent_v2"];
       if (!isObject(multiAgentV2)) {
@@ -318,69 +454,25 @@ function validateNativeMultiAgentV2Overrides(overrides: JsonObject): void {
   }
 }
 
-function deepMerge(base: JsonObject, overrides: JsonObject): JsonObject {
+export function mergeCodexOverrides(
+  base: JsonObject,
+  overrides: JsonObject,
+): JsonObject {
+  validateOverrideKeys(base);
+  validateOverrideKeys(overrides);
+  return deepMerge(structuredClone(base), overrides);
+}
+
+/** @internal */
+export function deepMerge(base: JsonObject, overrides: JsonObject): JsonObject {
   for (const [key, value] of Object.entries(overrides)) {
     const existing = Object.hasOwn(base, key) ? base[key] : undefined;
     base[key] =
       isObject(value) && isObject(existing)
         ? deepMerge({ ...existing }, value)
-        : cloneJson(value);
+        : structuredClone(value);
   }
   return base;
-}
-
-function cloneJson<T extends JsonValue>(value: T): T {
-  return structuredClone(value);
-}
-
-function deepFreezeJson(value: JsonValue): void {
-  if (typeof value !== "object" || value === null || Object.isFrozen(value)) {
-    return;
-  }
-  for (const item of Array.isArray(value) ? value : Object.values(value)) {
-    deepFreezeJson(item);
-  }
-  Object.freeze(value);
-}
-
-function normalizeAzureOpenAIEndpoint(value: string): string {
-  const input = value.trim();
-  if (
-    input.length === 0 ||
-    input.length > 2_048 ||
-    /[\u0000-\u001f\u007f]/u.test(input)
-  ) {
-    throw new ConfigurationError(
-      "The Azure OpenAI endpoint must be a valid HTTPS URL.",
-    );
-  }
-  let endpoint: URL;
-  try {
-    endpoint = new URL(input);
-  } catch {
-    throw new ConfigurationError(
-      "The Azure OpenAI endpoint must be a valid HTTPS URL.",
-    );
-  }
-  if (
-    endpoint.protocol !== "https:" ||
-    endpoint.username !== "" ||
-    endpoint.password !== "" ||
-    endpoint.search !== "" ||
-    endpoint.hash !== ""
-  ) {
-    throw new ConfigurationError(
-      "The Azure OpenAI endpoint must be an HTTPS URL without credentials, query parameters, or a fragment.",
-    );
-  }
-  const pathname = endpoint.pathname.replace(/\/+$/u, "");
-  if (!["", "/openai", "/openai/v1"].includes(pathname.toLowerCase())) {
-    throw new ConfigurationError(
-      "The Azure OpenAI endpoint must be a resource URL or end in /openai/v1.",
-    );
-  }
-  endpoint.pathname = "/openai/v1";
-  return endpoint.toString();
 }
 
 function isObject(value: unknown): value is Record<string, JsonValue> {
